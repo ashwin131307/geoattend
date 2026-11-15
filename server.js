@@ -1,43 +1,21 @@
 const express = require('express');
-const Database = require('better-sqlite3');
 const cookieSession = require('cookie-session');
+const fs = require('fs');
 const path = require('path');
 
 const app = express();
-const db = new Database('geoattend.db');
+const DATA_FILE = path.join(__dirname, 'database.json');
+
+function loadDB() {
+  if (!fs.existsSync(DATA_FILE)) return { users: [], events: [], attendance: [] };
+  try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
+  catch { return { users: [], events: [], attendance: [] }; }
+}
+function saveDB(data) { fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2)); }
 
 app.use(express.json({ limit: '10mb' }));
-app.use(cookieSession({ name: 'geoattend_sess', keys: ['geoattend-2026-rect'], maxAge: 7 * 86400 * 1000 }));
+app.use(cookieSession({ name: 'geoattend_sess', keys: ['geoattend-2026-json'], maxAge: 7 * 86400 * 1000 }));
 app.use(express.static(path.join(__dirname, 'public')));
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    google_id TEXT UNIQUE, email TEXT, name TEXT, role TEXT,
-    full_name TEXT, roll_no TEXT, department TEXT,
-    photo TEXT, descriptor TEXT
-  );
-  CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    lecturer_id INTEGER, title TEXT, code TEXT UNIQUE,
-    lat REAL, lng REAL,
-    shape TEXT DEFAULT 'rect',
-    radius INTEGER DEFAULT 30,
-    length INTEGER DEFAULT 20,
-    width INTEGER DEFAULT 15,
-    angle INTEGER DEFAULT 0,
-    minutes INTEGER DEFAULT 1,
-    ended INTEGER DEFAULT 0, created INTEGER
-  );
-  CREATE TABLE IF NOT EXISTS attendance (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_id INTEGER, student_id INTEGER,
-    face_verified INTEGER DEFAULT 0, secs INTEGER DEFAULT 0,
-    lat REAL, lng REAL, accuracy REAL, in_now INTEGER DEFAULT 0,
-    last_ping INTEGER, marked_at INTEGER,
-    UNIQUE(event_id, student_id)
-  );
-`);
 
 const getDistanceMeters = (lat1, lon1, lat2, lon2) => {
   const R = 6371e3, toRad = d => (d * Math.PI) / 180;
@@ -46,48 +24,40 @@ const getDistanceMeters = (lat1, lon1, lat2, lon2) => {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 };
 
-// Checks both Circular & Rectangular/Square (Rotated) Classroom Boundaries
 function checkGeofence(ev, stuLat, stuLng, accuracy) {
-  const buffer = Math.min(accuracy || 0, 15); // 15m indoor GPS buffer
+  const buffer = Math.min(accuracy || 0, 15);
   const dist = getDistanceMeters(ev.lat, ev.lng, stuLat, stuLng);
-
-  if (ev.shape === 'circle') {
-    return { inside: dist <= (ev.radius + buffer), dist };
-  }
-
-  // Convert Lat/Lng offset to local East (dx) and North (dy) in metres
+  if (ev.shape === 'circle') return { inside: dist <= (ev.radius + buffer), dist };
   const dy = (stuLat - ev.lat) * 111320;
   const dx = (stuLng - ev.lng) * 111320 * Math.cos((ev.lat * Math.PI) / 180);
-
-  // Rotate according to classroom orientation angle
   const rad = ((ev.angle || 0) * Math.PI) / 180;
   const rx = dx * Math.cos(rad) - dy * Math.sin(rad);
   const ry = dx * Math.sin(rad) + dy * Math.cos(rad);
-
-  const halfL = (ev.length || 20) / 2 + buffer;
-  const halfW = (ev.width || 15) / 2 + buffer;
-
-  const inside = Math.abs(rx) <= halfL && Math.abs(ry) <= halfW;
-  return { inside, dist };
+  const halfL = (ev.length || 30) / 2 + buffer;
+  const halfW = (ev.width || 20) / 2 + buffer;
+  return { inside: Math.abs(rx) <= halfL && Math.abs(ry) <= halfW, dist };
 }
 
 const euclideanDistance = (d1, d2) => Math.sqrt(d1.reduce((s, v, i) => s + (v - d2[i]) ** 2, 0));
 
 const auth = (req, res, next) => {
+  const db = loadDB();
   if (!req.session.userId) return res.status(401).json({ error: 'Not signed in' });
-  req.user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.userId);
+  req.user = db.users.find(u => u.id === req.session.userId);
   if (!req.user) return res.status(401).json({ error: 'User not found' });
   next();
 };
 
 const handleLogin = (req, res) => {
+  const db = loadDB();
   const rawName = (req.body.demoName || '').trim();
   if (!rawName) return res.status(400).json({ error: 'Please enter your name' });
   const sub = 'user_' + rawName.toLowerCase().replace(/\W+/g, '_');
-  let user = db.prepare('SELECT * FROM users WHERE google_id = ?').get(sub);
+  let user = db.users.find(u => u.google_id === sub);
   if (!user) {
-    const info = db.prepare('INSERT INTO users (google_id, email, name) VALUES (?, ?, ?)').run(sub, sub + '@campus.edu', rawName);
-    user = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid);
+    user = { id: Date.now(), google_id: sub, email: sub + '@campus.edu', name: rawName, role: null };
+    db.users.push(user);
+    saveDB(db);
   }
   req.session.userId = user.id;
   res.json({ ok: true });
@@ -101,63 +71,93 @@ app.get('/api/me', auth, (req, res) => {
 });
 
 app.post('/api/role', auth, (req, res) => {
-  if (req.user.role) return res.status(400).json({ error: 'Role already locked' });
-  db.prepare('UPDATE users SET role = ? WHERE id = ?').run(req.body.role, req.user.id);
+  const db = loadDB();
+  const user = db.users.find(u => u.id === req.user.id);
+  if (user.role) return res.status(400).json({ error: 'Role already locked' });
+  user.role = req.body.role;
+  saveDB(db);
   res.json({ ok: true });
 });
 
 app.post('/api/profile', auth, (req, res) => {
+  const db = loadDB();
   const { fullName, rollNo, department, photo, descriptor } = req.body;
   if (!fullName || !rollNo || !descriptor || descriptor.length !== 128) {
     return res.status(400).json({ error: 'All fields and face scan are required.' });
   }
-  const dupRoll = db.prepare('SELECT id FROM users WHERE LOWER(roll_no) = LOWER(?) AND id != ?').get(rollNo.trim(), req.user.id);
-  if (dupRoll) return res.status(400).json({ error: 'Roll Number already registered by another student!' });
+  const dup = db.users.find(u => u.roll_no && u.roll_no.toLowerCase() === rollNo.trim().toLowerCase() && u.id !== req.user.id);
+  if (dup) return res.status(400).json({ error: 'Roll Number already registered!' });
 
-  const others = db.prepare('SELECT full_name, roll_no, descriptor FROM users WHERE descriptor IS NOT NULL AND id != ?').all(req.user.id);
-  for (const other of others) {
-    const saved = JSON.parse(other.descriptor || '[]');
-    if (saved.length === 128 && euclideanDistance(saved, descriptor) < 0.48) {
-      return res.status(403).json({ error: `Multi-Face Blocked: This face is already registered with ${other.full_name} (Roll No: ${other.roll_no})!` });
+  for (const other of db.users) {
+    if (other.descriptor && other.id !== req.user.id) {
+      const saved = JSON.parse(other.descriptor);
+      if (saved.length === 128 && euclideanDistance(saved, descriptor) < 0.48) {
+        return res.status(403).json({ error: `Multi-Face Blocked: Registered with ${other.full_name} (Roll: ${other.roll_no})!` });
+      }
     }
   }
-  db.prepare('UPDATE users SET full_name = ?, roll_no = ?, department = ?, photo = ?, descriptor = ? WHERE id = ?')
-    .run(fullName.trim(), rollNo.trim(), (department || '').trim(), photo || '', JSON.stringify(descriptor), req.user.id);
+  const user = db.users.find(u => u.id === req.user.id);
+  user.full_name = fullName.trim();
+  user.roll_no = rollNo.trim();
+  user.department = (department || '').trim();
+  user.photo = photo || '';
+  user.descriptor = JSON.stringify(descriptor);
+  saveDB(db);
   res.json({ ok: true });
 });
 
 app.post('/api/logout', (req, res) => { req.session = null; res.json({ ok: true }); });
 
 app.post('/api/events', auth, (req, res) => {
+  const db = loadDB();
   const { title, lat, lng, shape, radius, length, width, angle, minutes } = req.body;
-  if (!title || lat == null || lng == null) return res.status(400).json({ error: 'Title and GPS location required' });
+  if (!title || lat == null || lng == null) return res.status(400).json({ error: 'Title and GPS required' });
   const code = Math.random().toString(36).substring(2, 8).toUpperCase();
-  const info = db.prepare(`
-    INSERT INTO events (lecturer_id, title, code, lat, lng, shape, radius, length, width, angle, minutes, created)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(req.user.id, title.trim(), code, lat, lng, shape || 'rect', radius || 30, length || 25, width || 15, angle || 0, minutes || 1, Date.now());
-  res.json({ id: info.lastInsertRowid, code });
+  const ev = {
+    id: Date.now(), lecturer_id: req.user.id, title: title.trim(), code, lat, lng,
+    shape: shape || 'rect', radius: radius || 30, length: length || 30, width: width || 20, angle: angle || 0,
+    minutes: minutes || 1, ended: 0, created: Date.now()
+  };
+  db.events.push(ev);
+  saveDB(db);
+  res.json({ id: ev.id, code });
 });
 
 app.get('/api/events', auth, (req, res) => {
-  res.json(db.prepare(`SELECT e.*, (SELECT COUNT(*) FROM attendance a WHERE a.event_id = e.id AND a.marked_at IS NOT NULL) as present FROM events e WHERE lecturer_id = ? ORDER BY created DESC`).all(req.user.id));
+  const db = loadDB();
+  const events = db.events.filter(e => e.lecturer_id === req.user.id).map(e => {
+    const presentCount = db.attendance.filter(a => a.event_id === e.id && a.marked_at).length;
+    return { ...e, present: presentCount };
+  }).sort((a, b) => b.created - a.created);
+  res.json(events);
 });
 
 app.get('/api/events/:id', auth, (req, res) => {
-  const event = db.prepare('SELECT * FROM events WHERE id = ? AND lecturer_id = ?').get(req.params.id, req.user.id);
+  const db = loadDB();
+  const event = db.events.find(e => e.id == req.params.id && e.lecturer_id === req.user.id);
   if (!event) return res.status(404).json({ error: 'Event not found' });
-  const attendees = db.prepare(`SELECT a.*, u.full_name, u.roll_no, u.department, u.photo FROM attendance a JOIN users u ON u.id = a.student_id WHERE a.event_id = ? ORDER BY u.roll_no ASC`).all(event.id);
+  const attendees = db.attendance.filter(a => a.event_id == event.id).map(a => {
+    const u = db.users.find(user => user.id === a.student_id) || {};
+    return { ...a, full_name: u.full_name, roll_no: u.roll_no, department: u.department, photo: u.photo };
+  }).sort((a, b) => (a.roll_no || '').localeCompare(b.roll_no || ''));
   res.json({ event, attendees });
 });
 
 app.post('/api/events/:id/end', auth, (req, res) => {
-  db.prepare('UPDATE events SET ended = 1 WHERE id = ? AND lecturer_id = ?').run(req.params.id, req.user.id);
+  const db = loadDB();
+  const ev = db.events.find(e => e.id == req.params.id && e.lecturer_id === req.user.id);
+  if (ev) { ev.ended = 1; saveDB(db); }
   res.json({ ok: true });
 });
 
 app.get('/api/events/:id/csv', auth, (req, res) => {
-  const event = db.prepare('SELECT * FROM events WHERE id = ? AND lecturer_id = ?').get(req.params.id, req.user.id);
-  const rows = db.prepare(`SELECT u.full_name, u.roll_no, u.department, a.lat, a.lng, a.secs, a.marked_at FROM attendance a JOIN users u ON u.id = a.student_id WHERE a.event_id = ?`).all(event.id);
+  const db = loadDB();
+  const event = db.events.find(e => e.id == req.params.id && e.lecturer_id === req.user.id);
+  if (!event) return res.status(404).send('Not found');
+  const rows = db.attendance.filter(a => a.event_id == event.id).map(a => {
+    const u = db.users.find(user => user.id === a.student_id) || {};
+    return { ...a, full_name: u.full_name, roll_no: u.roll_no, department: u.department };
+  });
   const csv = ['Name,Roll No,Department,Geo-Tag (Lat Lng),Google Maps Proof,Minutes Inside,Status,Marked At',
     ...rows.map(r => [`"${r.full_name}"`, `"${r.roll_no}"`, `"${r.department}"`, `"${r.lat || ''}, ${r.lng || ''}"`, r.lat ? `"https://maps.google.com/?q=${r.lat},${r.lng}"` : '""', Math.floor(r.secs / 60), r.marked_at ? 'Present' : 'Incomplete', r.marked_at ? `"${new Date(r.marked_at).toLocaleString()}"` : '""'].join(','))
   ].join('\n');
@@ -167,30 +167,43 @@ app.get('/api/events/:id/csv', auth, (req, res) => {
 });
 
 app.get('/api/join/:code', auth, (req, res) => {
-  const ev = db.prepare('SELECT * FROM events WHERE code = ?').get(req.params.code.toUpperCase());
+  const db = loadDB();
+  const ev = db.events.find(e => e.code === req.params.code.toUpperCase());
   if (!ev || ev.ended) return res.status(400).json({ error: 'Invalid or ended event code' });
   res.json(ev);
 });
 
 app.post('/api/events/:id/face', auth, (req, res) => {
+  const db = loadDB();
   const { descriptor } = req.body;
   const saved = JSON.parse(req.user.descriptor || '[]');
   if (!saved.length || euclideanDistance(saved, descriptor || []) > 0.55) {
-    return res.status(403).json({ error: 'Face did not match your registered student profile!' });
+    return res.status(403).json({ error: 'Face did not match your registered profile!' });
   }
-  db.prepare(`INSERT INTO attendance (event_id, student_id, face_verified, last_ping) VALUES (?, ?, 1, ?) ON CONFLICT(event_id, student_id) DO UPDATE SET face_verified = 1`).run(req.params.id, req.user.id, Date.now());
+  let att = db.attendance.find(a => a.event_id == req.params.id && a.student_id === req.user.id);
+  if (!att) {
+    att = { id: Date.now(), event_id: +req.params.id, student_id: req.user.id, face_verified: 1, secs: 0, lat: null, lng: null, accuracy: 0, in_now: 0, last_ping: Date.now(), marked_at: null };
+    db.attendance.push(att);
+  } else {
+    att.face_verified = 1;
+    att.last_ping = Date.now();
+  }
+  saveDB(db);
   res.json({ ok: true });
 });
 
 app.post('/api/checkin', auth, (req, res) => {
+  const db = loadDB();
   const { eventId, lat, lng, accuracy } = req.body;
-  const ev = db.prepare('SELECT * FROM events WHERE id = ?').get(eventId);
+  const ev = db.events.find(e => e.id == eventId);
   if (!ev || ev.ended) return res.status(400).json({ error: 'Event ended', ended: true });
-  const att = db.prepare('SELECT * FROM attendance WHERE event_id = ? AND student_id = ?').get(eventId, req.user.id);
+  let att = db.attendance.find(a => a.event_id == eventId && a.student_id === req.user.id);
+  if (!att) return res.status(400).json({ error: 'Join event first' });
+
   const now = Date.now();
   if (att.lat && att.lng && att.last_ping) {
     const jumped = getDistanceMeters(att.lat, att.lng, lat, lng), dt = (now - att.last_ping) / 1000;
-    if (dt > 0 && (jumped / dt) > 35 && jumped > 150) return res.status(400).json({ error: 'Suspicious GPS jump detected (Anti-Spoofing).' });
+    if (dt > 0 && (jumped / dt) > 35 && jumped > 150) return res.status(400).json({ error: 'GPS jump detected.' });
   }
 
   const { inside, dist } = checkGeofence(ev, lat, lng, accuracy);
@@ -198,12 +211,26 @@ app.post('/api/checkin', auth, (req, res) => {
   const secs = inside ? att.secs + (att.last_ping ? Math.min(15, Math.round((now - att.last_ping) / 1000)) : 5) : 0;
   const marked = att.marked_at || (secs >= need ? now : null);
 
-  db.prepare(`UPDATE attendance SET secs = ?, lat = ?, lng = ?, accuracy = ?, in_now = ?, last_ping = ?, marked_at = ? WHERE id = ?`).run(secs, lat, lng, accuracy || 0, inside ? 1 : 0, now, marked, att.id);
+  att.secs = secs;
+  att.lat = lat;
+  att.lng = lng;
+  att.accuracy = accuracy || 0;
+  att.in_now = inside ? 1 : 0;
+  att.last_ping = now;
+  att.marked_at = marked;
+  saveDB(db);
+
   res.json({ dist, inside, secs, need, marked: Boolean(marked) });
 });
 
 app.get('/api/my-attendance', auth, (req, res) => {
-  res.json(db.prepare(`SELECT e.title, e.created, a.marked_at, a.lat, a.lng FROM attendance a JOIN events e ON e.id = a.event_id WHERE a.student_id = ? ORDER BY e.created DESC`).all(req.user.id));
+  const db = loadDB();
+  const rows = db.attendance.filter(a => a.student_id === req.user.id).map(a => {
+    const e = db.events.find(event => event.id === a.event_id) || {};
+    return { title: e.title, created: e.created, marked_at: a.marked_at, lat: a.lat, lng: a.lng };
+  }).sort((a, b) => b.created - a.created);
+  res.json(rows);
 });
 
-app.listen(3000, () => console.log('✅ GeoAttend v2 (Rectangular & Square Classroom Edition) -> http://localhost:3000'));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('✅ GeoAttend JSON Server running on port ' + PORT));
