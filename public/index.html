@@ -62,7 +62,7 @@
         <div class="card">
           <h2>Sign In to GeoAttend</h2>
           <input type="text" id="demoName" placeholder="Enter your name" />
-          <button id="signInBtn" onclick="handleLogin()">Sign In</button>
+          <button type="button" id="signInBtn" onclick="handleLogin()">Sign In</button>
         </div>
       `;
     }
@@ -83,8 +83,8 @@
         <div class="card">
           <h2>Select Your Role</h2>
           <div class="flex-gap">
-            <button onclick="setRole('student')">Student</button>
-            <button onclick="setRole('lecturer')">Lecturer</button>
+            <button type="button" onclick="setRole('student')">Student</button>
+            <button type="button" onclick="setRole('lecturer')">Lecturer</button>
           </div>
         </div>
       `;
@@ -109,7 +109,7 @@
           <div style="text-align: center; margin-bottom: 15px;">
             <video id="webcam" autoplay playsinline width="320" height="240" style="background: #000; border-radius: 8px;"></video>
           </div>
-          <button onclick="captureProfileFace()">Capture Face & Register</button>
+          <button type="button" onclick="captureProfileFace()">Capture Face & Register</button>
         </div>
       `;
       startCamera();
@@ -152,9 +152,9 @@
           <div style="margin: 20px 0;">
             <h3>Check In to Event</h3>
             <input type="text" id="eventCode" placeholder="Enter 6-character Event Code" />
-            <button onclick="checkInEvent()">Check In Now</button>
+            <button type="button" onclick="checkInEvent()">Check In Now</button>
           </div>
-          <button class="btn-sec" onclick="handleLogout()">Sign Out</button>
+          <button type="button" class="btn-sec" onclick="handleLogout()">Sign Out</button>
         </div>
       `;
     }
@@ -199,7 +199,7 @@
             <input type="number" id="eventLat" placeholder="Latitude (e.g. 28.6139)" step="any" />
             <input type="number" id="eventLng" placeholder="Longitude (e.g. 77.2090)" step="any" />
             <input type="number" id="eventRadius" placeholder="Radius in meters (e.g. 50)" value="50" />
-            <button onclick="createEvent()">Create Event</button>
+            <button type="button" onclick="createEvent()">Create Event</button>
           </div>
 
           <h3>Active Events</h3>
@@ -208,12 +208,12 @@
               <div class="event-item">
                 <h4>${e.title} (Code: <strong>${e.code}</strong>)</h4>
                 <p>Radius: ${e.radius}m | Status: ${e.active ? 'Active' : 'Ended'}</p>
-                ${e.active ? `<button class="btn-sec" onclick="endEvent('${e.id}')">End Event</button>` : ''}
+                ${e.active ? `<button type="button" class="btn-sec" onclick="endEvent('${e.id}')">End Event</button>` : ''}
               </div>
             `).join('')}
           </div>
           
-          <button class="btn-sec" style="margin-top:20px;" onclick="handleLogout()">Sign Out</button>
+          <button type="button" class="btn-sec" style="margin-top:20px;" onclick="handleLogout()">Sign Out</button>
         </div>
       `;
     }
