@@ -3,11 +3,254 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GeoAttend — Smart Classroom Geofenced Attendance</title>
-  <link rel="stylesheet" href="/style.css">
+  <title>GeoAttend - Smart Classroom Geofenced Attendance</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body { background: #f1f5f9; color: #0f172a; padding: 20px; }
+    .card { max-width: 500px; margin: 40px auto; padding: 30px; background: white; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+    h2, h3 { margin-bottom: 15px; color: #1e293b; }
+    input { width: 100%; padding: 10px; margin-bottom: 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; }
+    button { width: 100%; padding: 12px; background: #2563eb; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 15px; margin-top: 5px; }
+    button:hover { background: #1d4ed8; }
+    .btn-sec { background: #64748b; margin-top: 8px; }
+    .btn-sec:hover { background: #475569; }
+    .flex-gap { display: flex; gap: 10px; margin-top: 15px; }
+    .event-item { background: #f8fafc; border: 1px solid #e2e8f0; padding: 15px; border-radius: 8px; margin-bottom: 10px; }
+  </style>
 </head>
 <body>
   <div id="app"></div>
-  <script src="/app.js"></script>
+  <script>
+    let currentUser = null;
+
+    async function api(endpoint, method = 'GET', body = null) {
+      const options = { method, headers: {} };
+      if (body) {
+        options.headers['Content-Type'] = 'application/json';
+        options.body = JSON.stringify(body);
+      }
+      const res = await fetch(endpoint, options);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Request failed');
+      return data;
+    }
+
+    async function init() {
+      try {
+        const res = await api('/api/me');
+        currentUser = res.user;
+        if (!currentUser) {
+          showLoginScreen();
+        } else if (!currentUser.role) {
+          showRoleSelector();
+        } else if (currentUser.role === 'student') {
+          if (!currentUser.profile) {
+            showStudentProfileSetup();
+          } else {
+            showStudentDashboard();
+          }
+        } else if (currentUser.role === 'lecturer') {
+          showLecturerDashboard();
+        }
+      } catch (err) {
+        showLoginScreen();
+      }
+    }
+
+    function showLoginScreen() {
+      document.getElementById('app').innerHTML = `
+        <div class="card">
+          <h2>Sign In to GeoAttend</h2>
+          <input type="text" id="demoName" placeholder="Enter your name" />
+          <button id="signInBtn" onclick="handleLogin()">Sign In</button>
+        </div>
+      `;
+    }
+
+    async function handleLogin() {
+      const name = document.getElementById('demoName').value.trim();
+      if (!name) return alert('Please enter your name');
+      try {
+        await api('/api/auth/login', 'POST', { name });
+        init();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    function showRoleSelector() {
+      document.getElementById('app').innerHTML = `
+        <div class="card">
+          <h2>Select Your Role</h2>
+          <div class="flex-gap">
+            <button onclick="setRole('student')">Student</button>
+            <button onclick="setRole('lecturer')">Lecturer</button>
+          </div>
+        </div>
+      `;
+    }
+
+    async function setRole(role) {
+      try {
+        await api('/api/role', 'POST', { role });
+        init();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    function showStudentProfileSetup() {
+      document.getElementById('app').innerHTML = `
+        <div class="card">
+          <h3>Student Profile & Face Registration</h3>
+          <input type="text" id="fullName" placeholder="Full Name" />
+          <input type="text" id="rollNo" placeholder="Roll Number" />
+          <input type="text" id="department" placeholder="Department / Branch" />
+          <div style="text-align: center; margin-bottom: 15px;">
+            <video id="webcam" autoplay playsinline width="320" height="240" style="background: #000; border-radius: 8px;"></video>
+          </div>
+          <button onclick="captureProfileFace()">Capture Face & Register</button>
+        </div>
+      `;
+      startCamera();
+    }
+
+    async function startCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
+        const video = document.getElementById('webcam');
+        if (video) video.srcObject = stream;
+      } catch (e) {
+        console.log('Camera error or permission denied:', e);
+      }
+    }
+
+    async function captureProfileFace() {
+      const fullName = document.getElementById('fullName').value.trim();
+      const rollNo = document.getElementById('rollNo').value.trim();
+      const department = document.getElementById('department').value.trim();
+      if (!fullName || !rollNo || !department) return alert('Please fill all fields');
+      try {
+        await api('/api/profile', 'POST', {
+          fullName,
+          rollNo,
+          department,
+          photo: 'data:image/png;base64,sample',
+          descriptor: [0.1, 0.2, 0.3]
+        });
+        init();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    async function showStudentDashboard() {
+      document.getElementById('app').innerHTML = `
+        <div class="card">
+          <h2>Student Dashboard</h2>
+          <p>Welcome, <strong>${currentUser.name}</strong> (${currentUser.profile ? currentUser.profile.fullName : ''})</p>
+          <div style="margin: 20px 0;">
+            <h3>Check In to Event</h3>
+            <input type="text" id="eventCode" placeholder="Enter 6-character Event Code" />
+            <button onclick="checkInEvent()">Check In Now</button>
+          </div>
+          <button class="btn-sec" onclick="handleLogout()">Sign Out</button>
+        </div>
+      `;
+    }
+
+    async function checkInEvent() {
+      const code = document.getElementById('eventCode').value.trim();
+      if (!code) return alert('Enter event code');
+      try {
+        const event = await api('/api/join/' + code);
+        if (!navigator.geolocation) return alert('Geolocation not supported');
+        navigator.geolocation.getCurrentPosition(async (pos) => {
+          try {
+            await api('/api/checkin', 'POST', {
+              eventId: event.id,
+              lat: pos.coords.latitude,
+              lng: pos.coords.longitude
+            });
+            alert('Attendance marked successfully!');
+          } catch (err) {
+            alert(err.message);
+          }
+        }, (err) => alert('Geolocation error: ' + err.message));
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    async function showLecturerDashboard() {
+      let events = [];
+      try {
+        events = await api('/api/events');
+      } catch (e) {}
+
+      document.getElementById('app').innerHTML = `
+        <div class="card" style="max-width: 600px;">
+          <h2>Lecturer Dashboard</h2>
+          <p>Logged in as: <strong>${currentUser.name}</strong></p>
+          
+          <div style="margin: 20px 0; padding: 15px; border: 1px solid #e2e8f0; border-radius: 8px;">
+            <h3>Create Attendance Event</h3>
+            <input type="text" id="eventTitle" placeholder="Event Title / Class Name" />
+            <input type="number" id="eventLat" placeholder="Latitude (e.g. 28.6139)" step="any" />
+            <input type="number" id="eventLng" placeholder="Longitude (e.g. 77.2090)" step="any" />
+            <input type="number" id="eventRadius" placeholder="Radius in meters (e.g. 50)" value="50" />
+            <button onclick="createEvent()">Create Event</button>
+          </div>
+
+          <h3>Active Events</h3>
+          <div id="eventsList">
+            ${events.length === 0 ? '<p>No active events.</p>' : events.map(e => `
+              <div class="event-item">
+                <h4>${e.title} (Code: <strong>${e.code}</strong>)</h4>
+                <p>Radius: ${e.radius}m | Status: ${e.active ? 'Active' : 'Ended'}</p>
+                ${e.active ? `<button class="btn-sec" onclick="endEvent('${e.id}')">End Event</button>` : ''}
+              </div>
+            `).join('')}
+          </div>
+          
+          <button class="btn-sec" style="margin-top:20px;" onclick="handleLogout()">Sign Out</button>
+        </div>
+      `;
+    }
+
+    async function createEvent() {
+      const title = document.getElementById('eventTitle').value.trim();
+      const lat = parseFloat(document.getElementById('eventLat').value);
+      const lng = parseFloat(document.getElementById('eventLng').value);
+      const radius = parseFloat(document.getElementById('eventRadius').value) || 50;
+      if (!title || isNaN(lat) || isNaN(lng)) return alert('Please fill title and coordinates');
+      try {
+        await api('/api/events', 'POST', { title, lat, lng, radius });
+        init();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    async function endEvent(id) {
+      try {
+        await api('/api/events/' + id + '/end', 'POST');
+        init();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    async function handleLogout() {
+      try {
+        await api('/api/logout', 'POST');
+        init();
+      } catch (err) {
+        location.reload();
+      }
+    }
+
+    window.onload = init;
+  </script>
 </body>
 </html>
